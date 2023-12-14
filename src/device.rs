@@ -1,3 +1,4 @@
+use bitflags::bitflags;
 use soapysdr_sys::*;
 pub use soapysdr_sys::SoapySDRRange as Range;
 use std::slice;
@@ -95,6 +96,30 @@ impl From<Direction> for c_int {
     fn from(f: Direction) -> c_int {
         f as c_int
     }
+}
+
+bitflags! {
+    // SoapySDR C API defines flag arguments as signed int
+    // but bindgen generates constants as u32.
+    // Should it be i32 or u32 here?
+    // Well, it does not really matter for bit flags.
+
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct StreamFlags: i32 {
+        const END_BURST      = SOAPY_SDR_END_BURST      as i32;
+        // Not sure if it is better to have HAS_TIME here or not
+        //const HAS_TIME       = SOAPY_SDR_HAS_TIME       as i32;
+        const END_ABRUPT     = SOAPY_SDR_END_ABRUPT     as i32;
+        const ONE_PACKET     = SOAPY_SDR_ONE_PACKET     as i32;
+        const MORE_FRAGMENTS = SOAPY_SDR_MORE_FRAGMENTS as i32;
+        const WAIT_TRIGGER   = SOAPY_SDR_WAIT_TRIGGER   as i32;
+    }
+}
+
+pub struct StreamResult {
+    pub len: usize,
+    pub flags: StreamFlags,
+    pub time: Option<i64>,
 }
 
 struct DeviceInner {
@@ -383,8 +408,6 @@ impl Device {
                 device: self.clone(),
                 handle: stream,
                 nchannels: channels.len(),
-                flags: 0,
-                time_ns: 0,
                 active: false,
                 phantom: PhantomData,
             })
@@ -871,8 +894,6 @@ pub struct RxStream<E: StreamSample> {
     device: Device,
     handle: *mut SoapySDRStream,
     nchannels: usize,
-    flags: i32,
-    time_ns: i64,
     active: bool,
     phantom: PhantomData<fn(&mut[E])>,
 }
@@ -945,6 +966,19 @@ impl<E: StreamSample> RxStream<E> {
     /// # Panics
     ///  * If `buffers` is not the same length as the `channels` array passed to `Device::rx_stream`.
     pub fn read(&mut self, buffers: &mut [&mut [E]], timeout_us: i64) -> Result<usize, Error> {
+        Ok(self.read_ext(buffers, StreamFlags::default(), None, timeout_us)?.len)
+    }
+
+    /// Extended function to read samples from the stream into the provided buffers.
+    /// This one supports SoapySDR stream flags and timestamps.
+    ///
+    /// `buffers` contains one destination slice for each channel of this stream.
+    ///
+    /// Returns the number of samples read, which may be smaller than the size of the passed arrays.
+    ///
+    /// # Panics
+    ///  * If `buffers` is not the same length as the `channels` array passed to `Device::rx_stream`.
+    pub fn read_ext(&mut self, buffers: &mut [&mut [E]], flags: StreamFlags, time_ns: Option<i64>, timeout_us: i64) -> Result<StreamResult, Error> {
         unsafe {
             assert!(buffers.len() == self.nchannels);
 
@@ -953,18 +987,39 @@ impl<E: StreamSample> RxStream<E> {
             //TODO: avoid this allocation
             let buf_ptrs = buffers.iter().map(|b| b.as_ptr()).collect::<Vec<_>>();
 
-            self.flags = 0;
+            let mut flags_arg = flags.bits();
+            let mut time_ns_arg = match time_ns {
+                Some(time) => {
+                    flags_arg |= SOAPY_SDR_HAS_TIME as i32;
+                    time
+                },
+                None => 0,
+            };
             let len = len_result(SoapySDRDevice_readStream(
                 self.device.inner.ptr,
                 self.handle,
                 buf_ptrs.as_ptr() as *const *mut _,
                 num_samples,
-                &mut self.flags as *mut _,
-                &mut self.time_ns as *mut _,
+                &mut flags_arg as *mut _,
+                &mut time_ns_arg as *mut _,
                 timeout_us as _
             ))?;
 
-            Ok(len as usize)
+            Ok(StreamResult{
+                len: len as usize,
+                // from_bits returns None if any unknown bits are set.
+                // Take only the known flags. Exclude SOAPY_SDR_HAS_TIME
+                // since that information is availabie in the time field.
+                // This way unwrap() should never panic here.
+                flags: StreamFlags::from_bits(flags_arg & (0
+                    | SOAPY_SDR_END_BURST      as i32
+                    | SOAPY_SDR_END_ABRUPT     as i32
+                    | SOAPY_SDR_ONE_PACKET     as i32
+                    | SOAPY_SDR_MORE_FRAGMENTS as i32
+                    | SOAPY_SDR_WAIT_TRIGGER   as i32
+                    )).unwrap(),
+                time: if (flags_arg & SOAPY_SDR_HAS_TIME as i32) != 0 { Some(time_ns_arg) } else { None },
+            })
         }
     }
 
