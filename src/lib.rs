@@ -49,3 +49,19 @@ pub fn configure_logging() {
         SoapySDR_registerLogHandler(Some(soapy_log));
     }
 }
+
+/// Convert a tick count into a time in nanoseconds using the tick rate.
+pub fn ticks_to_time_ns(ticks: i64, rate: f64) -> i64 {
+    use soapysdr_sys::SoapySDR_ticksToTimeNs;
+    unsafe {
+        SoapySDR_ticksToTimeNs(ticks, rate)
+    }
+}
+
+/// Convert a time in nanoseconds into a tick count using the tick rate.
+pub fn time_ns_to_ticks(time_ns: i64, rate: f64) -> i64 {
+    use soapysdr_sys::SoapySDR_timeNsToTicks;
+    unsafe {
+        SoapySDR_timeNsToTicks(time_ns, rate)
+    }
+}
